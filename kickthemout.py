@@ -9,7 +9,26 @@ See License at nikolaskama.me (https://nikolaskama.me/kickthemoutproject)
 
 import os, sys, logging, math, traceback, optparse, threading
 from time import sleep
+from scapy.all import *
+from scapy.all import Ether, ARP, ICMP, IP
+import socket
+import nmap
+import time
+from getmac import get_mac_address
+
+
 BLUE, RED, WHITE, YELLOW, MAGENTA, GREEN, END = '\33[94m', '\033[91m', '\33[97m', '\33[93m', '\033[1;35m', '\033[1;32m', '\033[0m'
+
+# Global variable for default gateway IP
+defaultGatewayIP = None
+
+def regenOnlineIPs():
+    global defaultGatewayMac
+    # Assuming the function is supposed to regenerate or refresh the MAC addresses
+    # Add the actual logic here to regenerate the online IPs and the default gateway MAC
+    print("Regenerating online IPs and refreshing default gateway MAC address...")
+    # Your logic to update defaultGatewayMac
+    defaultGatewayMac = "new_mac_address_here"  # Example placeholder
 
 try:
     # check whether user is root
@@ -29,7 +48,7 @@ logging.getLogger("scapy.runtime").setLevel(logging.ERROR)  # Shut up scapy!
 try:
     from scapy.config import conf  
     conf.ipv6_enabled = False
-    from scapy.all import *
+    from scapy.all import Ether, ARP, ICMP
     import scan, spoof, nmap
     from urllib.request import urlopen, Request
     from urllib.error import URLError
@@ -95,10 +114,9 @@ def optionBanner():
 
 # initiate debugging process
 def runDebug():
+    global defaultGatewayMac, defaultGatewayIP
     print("\n\n{}WARNING! An unknown error has occurred, starting debug...{}".format(RED, END))
-    print(
-    "{}Starting debug... (Please report this crash on 'https://github.com/k4m4/kickthemout/issues' with your private information removed where necessary){}".format(
-        RED, END))
+    print("{}Starting debug... (Please report this crash on 'https://github.com/k4m4/kickthemout/issues' with your private information removed where necessary){}".format(RED, END))
     try:
         print("Current defaultGatewayMac: " + defaultGatewayMac)
     except:
@@ -150,34 +168,48 @@ def getDefaultInterface(returnNet=False):
             return None
         return net
 
-    iface_routes = [route for route in scapy.config.conf.route.routes if route[3] == scapy.config.conf.iface and route[1] != 0xFFFFFFFF]
-    network, netmask, _, interface, address, _ = max(iface_routes, key=lambda item:item[1])
-    net = to_CIDR_notation(network, netmask)
-    if net:
-        if returnNet:
-            return net
+    # Select the most appropriate interface based on the routing table
+    iface_routes = [route for route in scapy.config.conf.route.routes if route[1] != 0xFFFFFFFF]
+    # Sort routes based on the netmask, preferring routes with a smaller netmask (broader network)
+    iface_routes.sort(key=lambda item: item[1], reverse=True)
+    if iface_routes:
+        network, netmask, _, interface, address, _ = iface_routes[0]
+        net = to_CIDR_notation(network, netmask)
+        if net:
+            print(f"Selected interface: {interface} with network: {net}")  # Logging the selected interface and network
+            if returnNet:
+                return net
+            else:
+                return interface
         else:
-            return interface
+            print("No valid network interface found.")  # Logging when no valid interface is found
+            return None
+    else:
+        print("No valid network interface found.")  # Logging when no valid interface is found
+        return None
 
+  
 
+def retrieveMACAddress(ip_address):
+    try:
+        ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip_address), timeout=2, verbose=False)
+        for sent, received in ans:
+            return received.hwsrc
+    except Exception as e:
+        print(f"Failed to retrieve MAC address for {ip_address}: {e}")
+        return None
 
 # retrieve default interface MAC address
 def getDefaultInterfaceMAC():
     try:
+        defaultInterface = getDefaultInterface()
         defaultInterfaceMac = get_if_hwaddr(defaultInterface)
-        if defaultInterfaceMac == "" or not defaultInterfaceMac:
-            print(
-            "\n{}ERROR: Default Interface MAC Address could not be obtained. Please enter MAC manually.{}\n".format(
-                RED, END))
-            header = ('{}kickthemout{}> {}Enter MAC Address {}(MM:MM:MM:SS:SS:SS): '.format(BLUE, WHITE, RED, END))
-            return (input(header))
-        else:
-            return defaultInterfaceMac
-    except:
-        # request interface MAC address (after failed detection by scapy)
-        print("\n{}ERROR: Default Interface MAC Address could not be obtained. Please enter MAC manually.{}\n".format(RED, END))
-        header = ('{}kickthemout{}> {}Enter MAC Address {}(MM:MM:MM:SS:SS:SS): '.format(BLUE, WHITE, RED, END))
-        return (input(header))
+        if not defaultInterfaceMac:
+            raise ValueError("Default Interface MAC Address could not be obtained")
+        return defaultInterfaceMac
+    except Exception as e:
+        print(f"ERROR: {e}")
+        return None
 
 
 
@@ -185,18 +217,24 @@ def getDefaultInterfaceMAC():
 def getGatewayIP():
     global stopAnimation
     try:
-        getGateway, timeout = sr1(IP(dst="github.com", ttl=0) / ICMP() / "XXXXXXXXXXX", verbose=False, timeout=4)
-        if timeout:
-            raise Exception()
-        return getGateway.src
-    except:
+        # Use the ARP method to get the gateway IP and MAC directly
+        gateway_ip = conf.route.route("0.0.0.0")[2]  # Get the default gateway IP
+        if not gateway_ip:
+            raise ValueError("Gateway IP could not be determined")
+        gateway_mac = get_mac_address(ip=gateway_ip)
+        if not gateway_mac:
+            raise ValueError("Gateway MAC address could not be retrieved")
+        return gateway_ip, gateway_mac
+    except Exception as e:
         # request gateway IP address (after failed detection by scapy)
         stopAnimation = True
-        print("\n{}ERROR: Gateway IP could not be obtained. Please enter IP manually.{}\n".format(RED, END))
-        header = ('{}kickthemout{}> {}Enter Gateway IP {}(e.g. 192.168.1.1): '.format(BLUE, WHITE, RED, END))
-        return (input(header))
-
-
+        print("\n{}ERROR: Gateway IP or MAC could not be obtained. Please enter them manually.{}\n".format(RED, END))
+        print("Detailed error: {}".format(e))
+        header_ip = ('{}kickthemout{}> {}Enter Gateway IP {}(e.g. 192.168.1.1): '.format(BLUE, WHITE, RED, END))
+        gateway_ip = input(header_ip)
+        header_mac = ('{}kickthemout{}> {}Enter your gateways MAC Address {}(MM:MM:MM:SS:SS:SS): '.format(BLUE, WHITE, RED, END))
+        gateway_mac = input(header_mac)
+        return gateway_ip, gateway_mac
 
 # retrieve host MAC address
 def retrieveMACAddress(host):
@@ -236,14 +274,13 @@ def regenOnlineIPs():
     if not defaultGatewayMacSet:
         defaultGatewayMac = ""
 
-    onlineIPs = []
+    onlineIPs = [host[0] for host in hostsList]
     for host in hostsList:
-        onlineIPs.append(host[0])
-        if not defaultGatewayMacSet:
-            if host[0] == defaultGatewayIP:
-                defaultGatewayMac = host[1]
+        if not defaultGatewayMacSet and host[0] == defaultGatewayIP:
+            defaultGatewayMac = host[1]
+            break
 
-    if not defaultGatewayMacSet and defaultGatewayMac == "":
+    if not defaultGatewayMacSet and not defaultGatewayMac:
         # request gateway MAC address (after failed detection by scapy)
         stopAnimation = True
         print("\n{}ERROR: Default Gateway MAC Address could not be obtained. Please enter MAC manually.{}\n".format(RED, END))
@@ -259,16 +296,13 @@ def scanNetwork():
     try:
         # call scanning function from scan.py
         hostsList = scan.scanNetwork(getDefaultInterface(True))
-    except KeyboardInterrupt:
-        shutdown()
-    except:
-        print("\n\n{}ERROR: Network scanning failed. Please check your requirements configuration.{}".format(RED, END))
-        print("\n{}If you still cannot resolve this error, please submit an issue here:\n\t{}https://github.com/k4m4/kickthemout/issues\n\n{}Details: {}{}{}".format(RED, BLUE, RED, GREEN, str(sys.exc_info()[1]), END))
+    except Exception as e:
+        print(f"\n{RED}ERROR: Network scanning failed. {e}{END}")
         os._exit(1)
-    try:
-        regenOnlineIPs()
-    except KeyboardInterrupt:
-        shutdown()
+    if not hostsList:
+        print(f"{RED}No hosts found on the network. Please check your network connection and settings.{END}")
+        os._exit(1)
+    regenOnlineIPs()
 
 
 
@@ -341,14 +375,14 @@ def nonInteractiveAttack():
                 if macAddress == False:
                     print("\n{}ERROR: MAC address of target host could not be retrieved! Maybe host is down?{}".format(RED, END))
                     os._exit(1)
-                spoof.sendPacket(defaultInterfaceMac, defaultGatewayIP, ipAddress, macAddress)
+                spoof.sendPacket(defaultInterface, defaultGatewayIP, ipAddress, macAddress)
             if options.packets is not None:
                 time.sleep(60/float(options.packets))
             else:
                 time.sleep(10)
     except KeyboardInterrupt:
         # re-arp targets on KeyboardInterrupt exception
-        print("\n{}Re-arping{} target(s)...{}".format(RED, GREEN, END))
+
         reArp = 1
         while reArp != 10:
             # broadcast ARP packets with legitimate info to restore connection
@@ -396,7 +430,7 @@ def kickoneoff():
             if host[0] == onlineIPs[i]:
                 mac = host[1]
         try:
-            hostname = utils.socket.gethostbyaddr(onlineIPs[i])[0]
+            hostname = socket.gethostbyaddr(onlineIPs[i])[0]
         except:
             hostname = "N/A"
         vendor = resolveMac(mac)
@@ -431,6 +465,7 @@ def kickoneoff():
     try:
         while True:
             # broadcast malicious ARP packets
+            spoof.sendPacket(defaultInterface, defaultGatewayIP, oneTargetIP, oneTargetMAC)
             spoof.sendPacket(defaultInterfaceMac, defaultGatewayIP, oneTargetIP, oneTargetMAC)
             if options.packets is not None:
                 time.sleep(60/float(options.packets))
@@ -479,7 +514,7 @@ def kicksomeoff():
             if host[0] == onlineIPs[i]:
                 mac = host[1]
         try:
-            hostname = utils.socket.gethostbyaddr(onlineIPs[i])[0]
+            hostname = socket.gethostbyaddr(onlineIPs[i])[0]
         except:
             hostname = "N/A"
         vendor = resolveMac(mac)
@@ -573,7 +608,7 @@ def kickalloff():
             if host[0] == onlineIPs[i]:
                 mac = host[1]
         try:
-            hostname = utils.socket.gethostbyaddr(onlineIPs[i])[0]
+            hostname = socket.gethostbyaddr(onlineIPs[i])[0]
         except:
             hostname = "N/A"
         vendor = resolveMac(mac)
@@ -698,7 +733,7 @@ def main():
                 if host[0] == onlineIPs[i]:
                     mac = host[1]
             try:
-                hostname = utils.socket.gethostbyaddr(onlineIPs[i])[0]
+                hostname = socket.gethostbyaddr(onlineIPs[i])[0]
             except:
                 hostname = "N/A"
             vendor = resolveMac(mac)
@@ -754,7 +789,7 @@ if __name__ == '__main__':
     # configure appropriate network info
     try:
         defaultInterface = getDefaultInterface()
-        defaultGatewayIP = getGatewayIP()
+        defaultGatewayIP, defaultGatewayMac = getGatewayIP()
         defaultInterfaceMac = getDefaultInterfaceMAC()
         global defaultGatewayMacSet
         defaultGatewayMacSet = False
